@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-vault-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for semantic search over an Obsidian vault using nomic-embed-text + SQLite-vec",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "index": "node src/run-index.js",
+    "reindex": "node src/run-index.js --reindex"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.8.2",
+    "chokidar": "^4.0.3",
+    "gray-matter": "^4.0.3",
+    "sqlite-vec": "^0.1.6"
+  }
+}

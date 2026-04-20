@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.obsidian-vault-mcp.ollama</string>
+
+    <key>Comment</key>
+    <string>Start Ollama 5 minutes after login so the obsidian-vault-mcp embedding server is warm when needed, without slowing boot.</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/ollama</string>
+        <string>serve</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OLLAMA_FLASH_ATTENTION</key>
+        <string>1</string>
+        <key>OLLAMA_KV_CACHE_TYPE</key>
+        <string>q8_0</string>
+    </dict>
+
+    <!-- Wait 300s (5 min) after login before starting -->
+    <key>Delay</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/ollama-launchd.err.log</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/ollama-launchd.out.log</string>
+</dict>
+</plist>
