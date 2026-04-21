@@ -569,7 +569,7 @@ server.tool(
   {
     path: z.string().describe('Relative path within the vault'),
     operation: z.enum(['get', 'set']).describe('"get" to read frontmatter, "set" to merge fields into frontmatter'),
-    fields: z.record(z.unknown()).optional().describe('Key/value pairs to set (required when operation="set")'),
+    fields: z.record(z.string(), z.unknown()).optional().describe('Key/value pairs to set (required when operation="set")'),
   },
   async ({ path: relPath, operation, fields }) => {
     try {
