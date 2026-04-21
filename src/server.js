@@ -3,7 +3,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, unlinkSync, renameSync } from 'fs';
+import matter from 'gray-matter';
 import { resolve, dirname, relative } from 'path';
 import { VAULT_PATH } from './config.js';
 import { embedText, ensureOllama } from './embedder.js';
@@ -442,6 +443,172 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Error listing folder: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: obs_vault_delete — delete a note
+// ---------------------------------------------------------------------------
+server.tool(
+  'obs_vault_delete',
+  `Delete a note from the Obsidian vault by its vault-relative path. Fails if the file does not exist.`,
+  {
+    path: z.string().describe('Relative path within the vault, e.g. "00 - Daily Notes/2026-03-25.md"'),
+  },
+  async ({ path: relPath }) => {
+    try {
+      const fullPath = safePath(relPath);
+
+      if (!existsSync(fullPath)) {
+        return {
+          content: [{ type: 'text', text: `Error: file not found at "${relPath}"` }],
+          isError: true,
+        };
+      }
+
+      unlinkSync(fullPath);
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ ok: true, path: relPath, deleted: true }) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error deleting note: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: obs_vault_move — move/rename a note within the vault
+// ---------------------------------------------------------------------------
+server.tool(
+  'obs_vault_move',
+  `Move or rename a note within the Obsidian vault. Fails if the source does not exist or the destination already exists. Parent directories for the destination are created automatically.`,
+  {
+    from: z.string().describe('Current relative path of the note within the vault'),
+    to: z.string().describe('New relative path for the note within the vault'),
+  },
+  async ({ from: fromRel, to: toRel }) => {
+    try {
+      const fromFull = safePath(fromRel);
+      const toFull = safePath(toRel);
+
+      if (!existsSync(fromFull)) {
+        return {
+          content: [{ type: 'text', text: `Error: source file not found at "${fromRel}"` }],
+          isError: true,
+        };
+      }
+
+      if (existsSync(toFull)) {
+        return {
+          content: [{ type: 'text', text: `Error: destination already exists at "${toRel}"` }],
+          isError: true,
+        };
+      }
+
+      mkdirSync(dirname(toFull), { recursive: true });
+      renameSync(fromFull, toFull);
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ ok: true, from: fromRel, to: toRel }) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error moving note: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: obs_vault_batch_fetch — read up to 10 notes in one call
+// ---------------------------------------------------------------------------
+server.tool(
+  'obs_vault_batch_fetch',
+  `Read up to 10 notes in a single call using vault-relative paths (as returned by obs_vault_search, obs_vault_deep_search, or obs_vault_list). Returns content per path on success, or a per-path error on failure. Prefer this over multiple obs_vault_fetch calls when hydrating a set of search results.`,
+  {
+    paths: z.array(z.string()).max(10).describe('List of vault-relative paths to fetch (max 10)'),
+  },
+  async ({ paths }) => {
+    try {
+      const notes = paths.map((relPath) => {
+        try {
+          const fullPath = safePath(relPath);
+          const content = readFileSync(fullPath, 'utf-8');
+          return { path: relPath, content };
+        } catch (err) {
+          return { path: relPath, error: err.message };
+        }
+      });
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ count: notes.length, notes }) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error in batch fetch: ${err.message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: obs_vault_frontmatter — get or set YAML frontmatter fields
+// ---------------------------------------------------------------------------
+server.tool(
+  'obs_vault_frontmatter',
+  `YAML-safe get/set of frontmatter fields using gray-matter — preserves all unmodified fields and formatting. Prefer this over obs_vault_patch for any frontmatter edits; obs_vault_patch does raw string manipulation and can corrupt multi-line YAML values. Use operation="get" to read all frontmatter fields. Use operation="set" with a fields object to merge specific key/value pairs into the existing frontmatter without touching the note body.`,
+  {
+    path: z.string().describe('Relative path within the vault'),
+    operation: z.enum(['get', 'set']).describe('"get" to read frontmatter, "set" to merge fields into frontmatter'),
+    fields: z.record(z.unknown()).optional().describe('Key/value pairs to set (required when operation="set")'),
+  },
+  async ({ path: relPath, operation, fields }) => {
+    try {
+      const fullPath = safePath(relPath);
+
+      if (!existsSync(fullPath)) {
+        return {
+          content: [{ type: 'text', text: `Error: file not found at "${relPath}"` }],
+          isError: true,
+        };
+      }
+
+      const raw = readFileSync(fullPath, 'utf-8');
+      const parsed = matter(raw);
+
+      if (operation === 'get') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ path: relPath, frontmatter: parsed.data }) }],
+        };
+      }
+
+      // operation === 'set'
+      if (!fields || Object.keys(fields).length === 0) {
+        return {
+          content: [{ type: 'text', text: `Error: "fields" is required and must be non-empty for operation="set"` }],
+          isError: true,
+        };
+      }
+
+      const updatedData = { ...parsed.data, ...fields };
+      const updatedContent = matter.stringify(parsed.content, updatedData);
+      writeFileSync(fullPath, updatedContent, 'utf-8');
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ ok: true, path: relPath, updated: Object.keys(fields) }) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error in frontmatter operation: ${err.message}` }],
         isError: true,
       };
     }

@@ -12,6 +12,10 @@ MCP server that gives Claude Code read/write access to an Obsidian vault with se
 | `obs_vault_fetch` | Retrieve full note content by vault-relative path. |
 | `obs_vault_write` | Create or overwrite a note. |
 | `obs_vault_patch` | Insert/replace content in an existing note — supports `append`, `prepend`, `heading_replace`, `heading_append`. |
+| `obs_vault_delete` | Delete a note. Fails if path doesn't exist. |
+| `obs_vault_move` | Move or rename a note within the vault. Creates destination parent dirs automatically. Fails if source missing or destination exists. |
+| `obs_vault_batch_fetch` | Read up to 10 notes in a single call. Per-path success or error. |
+| `obs_vault_frontmatter` | YAML-safe get/set of frontmatter fields via gray-matter. Prefer over `obs_vault_patch` for any frontmatter edits. |
 | `obs_vault_stats` | Index statistics (note/chunk counts). |
 
 Both search tools use **reciprocal rank fusion** (RRF) combining vector similarity (768-dim nomic-embed-text) with BM25 keyword matching (SQLite FTS5). `obs_vault_search` additionally multiplies scores by `e^(-λ × age_days)` with a 120-day half-life.
@@ -53,6 +57,10 @@ OBSIDIAN_VAULT_PATH="/path/to/your/vault" npm run reindex    # full rebuild
 #    "mcp__obsidian-vault__obs_vault_fetch",
 #    "mcp__obsidian-vault__obs_vault_write",
 #    "mcp__obsidian-vault__obs_vault_patch",
+#    "mcp__obsidian-vault__obs_vault_delete",
+#    "mcp__obsidian-vault__obs_vault_move",
+#    "mcp__obsidian-vault__obs_vault_batch_fetch",
+#    "mcp__obsidian-vault__obs_vault_frontmatter",
 #    "mcp__obsidian-vault__obs_vault_stats"
 ```
 
