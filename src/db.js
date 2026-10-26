@@ -121,6 +121,47 @@ export function deleteChunksForPath(path) {
   return ids.length;
 }
 
+/**
+ * All indexed note paths with the modified time they carried when indexed.
+ * Used by catch-up indexing to diff the index against the vault on disk.
+ */
+export function getIndexedPaths() {
+  const db = getDb();
+  return db
+    .prepare('SELECT path, MAX(modified) AS modified FROM chunks GROUP BY path')
+    .all();
+}
+
+/**
+ * Atomically replace all chunks for a note: delete old rows and insert the
+ * new (chunk, embedding) pairs in one transaction. Embeddings must already
+ * be computed — no async work happens inside the transaction, so a reader
+ * never sees a note half-indexed and concurrent writers can't interleave.
+ */
+export function replaceNoteChunks(path, items) {
+  const db = getDb();
+  const run = db.transaction(() => {
+    const deleted = deleteChunksForPath(path);
+    let inserted = 0;
+    for (const { chunk, embedding } of items) {
+      const rowid = insertChunk({
+        path: chunk.path,
+        heading: chunk.heading,
+        content: chunk.content,
+        cohort: chunk.cohort,
+        status: chunk.status,
+        tags: chunk.tags,
+        folder: chunk.folder,
+        modified: chunk.modified,
+      });
+      insertEmbedding(rowid, embedding);
+      inserted++;
+    }
+    return { deleted, inserted };
+  });
+  return run();
+}
+
 export function vectorSearch(queryEmbedding, topK = 10, filters = {}) {
   const db = getDb();
 

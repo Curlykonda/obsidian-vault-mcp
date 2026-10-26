@@ -119,24 +119,35 @@ export async function embedText(text) {
     }
   }
 
-  const truncated = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
+  let truncated = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
 
-  const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: EMBED_MODEL,
-      prompt: truncated,
-    }),
-  });
+  // Token density varies wildly (emoji, wikilinks, CJK can hit ~1 char/token),
+  // so a char cap alone can't guarantee we fit the model's context window.
+  // On a context-length error, halve the input and retry — guarantees progress
+  // at the cost of the pathological chunk's tail, which search can live with.
+  while (true) {
+    const res = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: EMBED_MODEL,
+        prompt: truncated,
+      }),
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      return data.embedding;
+    }
+
     const body = await res.text();
+    const contextOverflow = res.status === 500 && body.includes('exceeds the context length');
+    if (contextOverflow && truncated.length > 500) {
+      truncated = truncated.slice(0, Math.floor(truncated.length / 2));
+      continue;
+    }
     throw new Error(`Ollama embedding failed (${res.status}): ${body}`);
   }
-
-  const data = await res.json();
-  return data.embedding;
 }
 
 /**

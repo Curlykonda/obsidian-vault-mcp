@@ -37,6 +37,7 @@ export const VAULT_PATH = resolve(vaultEnv);
 
 export const DB_PATH = resolve(
   process.env.DB_PATH ||
+  localConfig.DB_PATH ||
   `${VAULT_PATH}/.obsidian/obsidian-vault-index.db`
 );
 
@@ -50,4 +51,7 @@ export const SKIP_PATTERNS = [
   '.trash',
   '.smart-env',
   'node_modules',
+  // Legacy Roam import — content was migrated into the PARA structure on
+  // 2025-12-02; indexing it again would duplicate every migrated note.
+  'henning-2025-12-02-20-03-22',
 ];

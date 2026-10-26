@@ -1,9 +1,12 @@
 import { readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { join, relative } from 'path';
 import { VAULT_PATH, SKIP_PATTERNS } from './config.js';
 import { parseAndChunkNote } from './chunker.js';
 import { embedText } from './embedder.js';
-import { getDb, insertChunk, insertEmbedding, deleteChunksForPath } from './db.js';
+import {
+  getDb, insertChunk, insertEmbedding, deleteChunksForPath,
+  getIndexedPaths, replaceNoteChunks,
+} from './db.js';
 
 /**
  * Recursively walk the vault and return all .md file paths.
@@ -66,17 +69,126 @@ export async function indexNote(filePath, { onChunk } = {}) {
 }
 
 /**
- * Re-index a single file: delete old chunks, then re-index.
+ * Re-index a single file. Embeddings are computed BEFORE the DB is touched,
+ * then old chunks are swapped for new ones in a single transaction — so the
+ * update is atomic per note and safe under concurrent server instances.
+ * Also handles the note-emptied case (0 chunks → old chunks removed).
  */
 export async function reindexNote(filePath) {
+  const relPath = relative(VAULT_PATH, filePath);
   const chunks = parseAndChunkNote(filePath);
-  if (chunks.length === 0) return 0;
 
-  const relPath = chunks[0].path;
-  const deleted = deleteChunksForPath(relPath);
+  const items = [];
+  for (const chunk of chunks) {
+    items.push({ chunk, embedding: await embedText(chunk.embedText) });
+  }
 
-  const count = await indexNote(filePath);
-  return { deleted, indexed: count };
+  const { deleted, inserted } = replaceNoteChunks(relPath, items);
+  return { deleted, indexed: inserted };
+}
+
+/**
+ * Like walkVault, but also returns each note's mtime (epoch seconds — the
+ * same unit the chunker stores in chunks.modified).
+ */
+export function walkVaultWithMtimes(dir = VAULT_PATH) {
+  const results = [];
+
+  function walk(currentDir) {
+    const entries = readdirSync(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        const shouldSkip = SKIP_PATTERNS.some(p => entry.name === p || entry.name.startsWith('.'));
+        if (shouldSkip) continue;
+        walk(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.md')) {
+        const stat = statSync(fullPath);
+        results.push({
+          fullPath,
+          relPath: relative(VAULT_PATH, fullPath),
+          mtime: stat.mtimeMs / 1000,
+        });
+      }
+    }
+  }
+
+  walk(dir);
+  return results;
+}
+
+// Only one catch-up runs per process; concurrent callers share the result.
+let _catchUpInFlight = null;
+
+/**
+ * Incremental catch-up: diff the vault on disk against the index and fix
+ * only the differences — new and modified notes are re-embedded, notes
+ * deleted (or moved) since the last index are removed. This is the cheap,
+ * always-safe path: after a normal day it touches a handful of files.
+ */
+export function catchUpIndex(opts = {}) {
+  if (_catchUpInFlight) return _catchUpInFlight;
+  _catchUpInFlight = _runCatchUp(opts).finally(() => { _catchUpInFlight = null; });
+  return _catchUpInFlight;
+}
+
+async function _runCatchUp({ onProgress } = {}) {
+  const startTime = Date.now();
+
+  const onDisk = walkVaultWithMtimes();
+  const inDb = getIndexedPaths();
+  const dbMtimes = new Map(inDb.map(r => [r.path, r.modified]));
+  const diskPaths = new Set(onDisk.map(f => f.relPath));
+
+  // Notes in the index but no longer on disk (deleted or moved)
+  const stale = inDb.filter(r => !diskPaths.has(r.path));
+  let removedChunks = 0;
+  for (const r of stale) {
+    removedChunks += deleteChunksForPath(r.path);
+  }
+
+  // New or modified notes. 1s tolerance absorbs mtime jitter from cloud sync.
+  const toIndex = onDisk.filter(f => {
+    const indexedMtime = dbMtimes.get(f.relPath);
+    return indexedMtime == null || Math.abs(f.mtime - indexedMtime) > 1;
+  });
+
+  let indexed = 0;
+  let chunks = 0;
+  let errors = 0;
+  let empty = 0;
+
+  for (const f of toIndex) {
+    try {
+      const result = await reindexNote(f.fullPath);
+      if (result.indexed === 0 && result.deleted === 0) {
+        // Empty / chunkless note: nothing to store, so it stays absent from
+        // the DB and shows up as a candidate every run. Count separately so
+        // reports don't claim real re-index work.
+        empty++;
+      } else {
+        chunks += result.indexed;
+        indexed++;
+      }
+    } catch (err) {
+      errors++;
+      console.error(`  ✗ Error indexing ${f.relPath}: ${err.message}`);
+    }
+    if (onProgress) {
+      onProgress({ done: indexed + errors + empty, total: toIndex.length, current: f.relPath });
+    }
+  }
+
+  return {
+    scanned: onDisk.length,
+    indexed,
+    chunks,
+    errors,
+    empty,
+    removedNotes: stale.length,
+    removedChunks,
+    elapsed: Date.now() - startTime,
+  };
 }
 
 /**
@@ -99,8 +211,11 @@ export async function indexVault({ reindex = false, onProgress } = {}) {
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     try {
-      const count = await indexNote(file);
-      totalChunks += count;
+      // reindexNote (not indexNote): embeds first, then swaps atomically —
+      // a mid-note embedding failure leaves no partial chunks behind, which
+      // would otherwise make catch-up skip the note (mtime matches).
+      const result = await reindexNote(file);
+      totalChunks += result.indexed;
     } catch (err) {
       console.error(`  ✗ Error indexing ${file}: ${err.message}`);
     }

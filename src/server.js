@@ -9,6 +9,7 @@ import { resolve, dirname, relative } from 'path';
 import { VAULT_PATH } from './config.js';
 import { embedText, ensureOllama } from './embedder.js';
 import { vectorSearch, bm25Search, getStats } from './db.js';
+import { catchUpIndex } from './indexer.js';
 
 // ---------------------------------------------------------------------------
 // Time-decay: recent notes score higher
@@ -616,7 +617,58 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: obs_vault_reindex — incremental index refresh on demand
+// ---------------------------------------------------------------------------
+server.tool(
+  'obs_vault_reindex',
+  `Refresh the semantic search index incrementally: scans the vault, re-embeds notes created or modified since they were last indexed, and removes deleted notes. Runs automatically at server start, so this is only needed mid-session — call it after creating or heavily editing notes so obs_vault_search reflects them immediately.`,
+  {},
+  async () => {
+    try {
+      const status = await ensureOllama();
+      if (!status.ok) {
+        return { content: [{ type: 'text', text: `Error: ${status.error}` }], isError: true };
+      }
+      const result = await catchUpIndex();
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ ...result, indexStats: getStats() }, null, 2),
+        }],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error refreshing index: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start server
 // ---------------------------------------------------------------------------
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// ---------------------------------------------------------------------------
+// Startup catch-up: reconcile the index with the vault in the background.
+// Fire-and-forget after connect so tool availability is never blocked.
+// Logs go to stderr — stdout is the MCP protocol channel.
+// ---------------------------------------------------------------------------
+(async () => {
+  try {
+    const status = await ensureOllama();
+    if (!status.ok) {
+      console.error(`[obsidian-vault-mcp] index catch-up skipped: ${status.error}`);
+      return;
+    }
+    const r = await catchUpIndex();
+    if (r.indexed || r.removedNotes || r.errors) {
+      console.error(
+        `[obsidian-vault-mcp] index catch-up: ${r.indexed} notes re-indexed, ` +
+        `${r.removedNotes} removed, ${r.errors} errors ` +
+        `(${(r.elapsed / 1000).toFixed(1)}s over ${r.scanned} scanned)`
+      );
+    }
+  } catch (err) {
+    console.error(`[obsidian-vault-mcp] index catch-up failed: ${err.message}`);
+  }
+})();
